@@ -50,7 +50,17 @@ services:
         condition: service_healthy
       machine-interface:
         condition: service_started
-
+  master_api:
+    build:
+      context: ./services/master_api
+    container_name: master_api
+    ports:
+      - "8001:8001"
+    environment:
+      DB_URL: postgres://user:password@postgres:5432/edgedb
+    depends_on:
+      postgres:
+        condition: service_healthy
   polling-service:
     build:
       context: ./services/polling_service
@@ -101,28 +111,28 @@ services:
   # network_mode: "host"  # Shares host's network stack
     container_name: machine_interface
     environment:
-      PLC_IP: 192.168.10.3  # Actual PLC I
+      PLC_IP: localhost  # Actual PLC I
       PLC_PORT: 502
       KAFKA_BROKER: kafka:9092
     depends_on:
       kafka:
         condition: service_healthy
-  oee_influx_writer:
-    build:
-      context: ./services/oee_influx_writer
-    container_name: oee_influx_writer
-    environment:
-      - KAFKA_BROKER=kafka:9092
-      - OEE_STATUS_TOPIC=oee_status
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=edgetoken
-      - INFLUXDB_ORG=EdgeOrg
-      - INFLUXDB_BUCKET=EdgeBucket
-    depends_on:
-      kafka:
-        condition: service_healthy
-      influxdb:
-        condition: service_started
+  # oee_influx_writer:
+  #   build:
+  #     context: ./services/oee_influx_writer
+  #   container_name: oee_influx_writer
+  #   environment:
+  #     - KAFKA_BROKER=kafka:9092
+  #     - OEE_STATUS_TOPIC=oee_status
+  #     - INFLUXDB_URL=http://influxdb:8086
+  #     - INFLUXDB_TOKEN=edgetoken
+  #     - INFLUXDB_ORG=EdgeOrg
+  #     - INFLUXDB_BUCKET=EdgeBucket
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #     influxdb:
+  #       condition: service_started
 
 
   postgres:

@@ -9,13 +9,14 @@ import psycopg2
 import psycopg2.extensions
 import uuid
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, status, Depends, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from typing import Optional,Union
 from influxdb_client import InfluxDBClient, WritePrecision, WriteOptions
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer # Import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError, NoBrokersAvailable as AIOKafkaNoBrokersAvailable
-
+from passlib.context import CryptContext
+from fastapi.middleware.cors import CORSMiddleware  # Add this import at the top
 # ─── Configuration ──────────────────────────────────────────────
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092") # Using KAFKA_BOOTSTRAP_SERVERS env var name
 PLC_WRITE_COMMANDS_TOPIC = os.getenv("PLC_WRITE_COMMANDS_TOPIC", "plc_write_commands")
@@ -89,6 +90,13 @@ async def init_kafka_producer():
 # ─── FastAPI App Initialization ──────────────────────────────────────────────
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 # ─── PostgreSQL Setup ──────────────────────────────────────────────
 DB_URL = os.getenv("DB_URL")
 for _ in range(10):
@@ -146,13 +154,13 @@ influx_client = InfluxDBClient(
 write_api = influx_client.write_api(write_options=WriteOptions(batch_size=1, flush_interval=1000))
 
 query_api = influx_client.query_api()
-
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # ─── Models & Auth Guard ───────────────────────────────────────────
 class LoginRequest(BaseModel):
-    Username: str
-    Password: str
-    Process: Optional[str] = ""
-
+    username: str
+    password: str
+    role: str
+    
 class ScanRequest(BaseModel):
     serial: str
     result: str  # "pass" | "fail" | "scrap"
@@ -180,31 +188,117 @@ def update_config(item: dict, _=Depends(require_login)):
 def get_config():
     return _config_cache
 
+
 # ─── Login & Logout ─────────────────────────────────────────────────────────
 @app.post("/api/login")
 def login(req: LoginRequest):
-    global _current_operator
-    allowed_ops = get_cfg("OPERATOR_IDS", "").split(",")
-    if req.Username not in allowed_ops:
-        raise HTTPException(403, f"Operator '{req.Username}' not permitted")
+    try:
+        # 1. Verify user exists and get credentials
+        cur.execute("""
+            SELECT u.id, u.username, u.full_name, u.hashed_password, 
+                   r.id as role_id, r.name as role_name
+            FROM users u
+            JOIN roles r ON u.role_id = r.id
+            WHERE u.username = %s AND u.is_active = TRUE
+        """, (req.username,))
+        
+        user = cur.fetchone()
+        if not user:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "Invalid username or password"
+            )
 
-    body = {
-      "MachineId":     get_cfg("MACHINE_ID"),
-      "Process":       req.Process,
-      "Username":      req.Username,
-      "Password":      req.Password,
-      "CbsStreamName": get_cfg("CBS_STREAM_NAME")
-    }
-    resp = requests.post(get_cfg("MES_OPERATOR_LOGIN_URL"), json=body)
-    if resp.status_code != 200 or not resp.json().get("IsSuccessful"):
-        raise HTTPException(resp.status_code, "Login failed")
+        # 2. Verify password
+        if not pwd_context.verify(req.password, user[3]):  # hashed_password is at index 3
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "Invalid username or password"
+            )
+        if req.role:
+            try:
+                requested_role_id = int(req.role)
+                if user[4] != requested_role_id:  # role_id is at index 4
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        detail="User doesn't have the requested role"
+                    )
+            except ValueError:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid role format"
+                )
+        # 3. Get Current Shift Information
+        current_time = datetime.now().time()
+        # Execute the query
+        cur.execute("""
+            SELECT id, name, start_time::time, end_time::time
+            FROM shift_master
+            WHERE 
+                (
+                    -- Case 1: Normal shift (start_time < end_time)
+                    (start_time::time <= end_time::time AND %s BETWEEN start_time::time AND end_time::time)
+                    OR
+                    -- Case 2: Overnight shift (start_time > end_time)
+                    (start_time::time > end_time::time AND (
+                        %s >= start_time::time OR %s <= end_time::time
+                    ))
+                )
+            ORDER BY start_time
+            LIMIT 1
+        """, (current_time, current_time, current_time))
+        # Fetch the result
+        shift = cur.fetchone()
+        # Check the result
+        if shift:
+            print(f"Current Shift: {shift}")
+        else:
+            print("No active shift found.")
 
-    _current_operator = req.Username
-    cur.execute(
-        "INSERT INTO operator_sessions(username, login_ts) VALUES(%s, NOW())",
-        (req.Username,)
-    )
-    return {"message": "Login successful"}
+        shift_info = {
+            "id": shift[0],
+            "name": shift[1],
+            "start_time": shift[2].isoformat(),
+            "end_time": shift[3].isoformat()
+        } if shift else None
+
+        # 4. Get User Permissions
+        cur.execute("""
+            SELECT m.name, p.permission
+            FROM permission_policies p
+            JOIN modules m ON p.module_id = m.id
+            WHERE p.role_id = %s
+        """, (user[4],))  # role_id is at index 4
+        permissions = {row[0]: row[1] for row in cur.fetchall()}
+
+        # 5. Record Login Session
+        cur.execute("""
+            INSERT INTO operator_sessions (username, login_ts)
+            VALUES (%s, NOW())
+            RETURNING id
+        """, (user[1],))
+
+        # 6. Return Comprehensive Response
+        return {
+            "status": "success",
+            "user": {
+                "id": user[0],
+                "username": user[1],
+                "full_name": user[2],
+                "role": {
+                    "id": user[4],
+                    "name": user[5]
+                }
+            },
+            "shift": shift_info,
+            "permissions": permissions,
+            "session_id": cur.fetchone()[0]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
 
 @app.post("/api/logout")
 def logout():

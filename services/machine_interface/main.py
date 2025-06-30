@@ -14,7 +14,7 @@ logger = logging.getLogger("machine_interface")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ─── Configuration ─────────────────────────────────────────────────────
-PLC_HOST = os.getenv("PLC_IP", "192.168.10.3")
+PLC_HOST = os.getenv("PLC_IP", "localhost")
 PLC_PORT = int(os.getenv("PLC_PORT", "502"))
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")

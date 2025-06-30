@@ -57,7 +57,7 @@ def parse_address(addr):
 
 async def poll_modbus():
     global modbus_data
-    client = AsyncModbusTcpClient("192.168.10.3", port=502)
+    client = AsyncModbusTcpClient("localhost", port=502)
     await client.connect()
 
     try:
@@ -96,7 +96,7 @@ async def websocket_handler(websocket):
     clients.add(websocket)
     print("Client connected")
 
-    client = AsyncModbusTcpClient("192.168.10.3", port=502)
+    client = AsyncModbusTcpClient("localhost", port=502)
     await client.connect()
 
     try:
