@@ -111,7 +111,7 @@ services:
   # network_mode: "host"  # Shares host's network stack
     container_name: machine_interface
     environment:
-      PLC_IP: localhost  # Actual PLC I
+      PLC_IP: host.docker.internal  # Actual PLC I
       PLC_PORT: 502
       KAFKA_BROKER: kafka:9092
     depends_on:

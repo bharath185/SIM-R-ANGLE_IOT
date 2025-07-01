@@ -14,7 +14,7 @@ logger = logging.getLogger("machine_interface")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # ─── Configuration ─────────────────────────────────────────────────────
-PLC_HOST = os.getenv("PLC_IP", "localhost")
+PLC_HOST = os.getenv("PLC_IP", "host.docker.internal")  # As string
 PLC_PORT = int(os.getenv("PLC_PORT", "502"))
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "kafka:9092")
@@ -39,16 +39,48 @@ KAFKA_TOPIC_OEE_STATUS = os.getenv("OEE_STATUS_TOPIC", "oee_status") # New topic
 # Barcode related registers (No change)
 BARCODE_FLAG_1 = 3303
 BARCODE_FLAG_2 = 3304
-BARCODE_1_BLOCK = (3100, 16)
-BARCODE_2_BLOCK = (3132, 16)
-
+BARCODE_1_BLOCK = (2000, 16)
+BARCODE_2_BLOCK = (2020, 16)
+BARCODE_3_BLOCK = (2200, 16)
+BARCODE_4_BLOCK = (2220, 16)
 # 13-bit status array starts from register 3400 (No change)
-STATUS_REGISTER = 3400
-STATUS_BITS = [
-    "InputStation", "Trace", "Process", "MES", "Transfer-1", "Vision-1",
-    "PickPlace-1", "Transfer-2", "Vision-2", "PickPlace-2", "TraceUpload",
-    "MESUpload", "UnloadStation"
-]
+STATUS_REGISTERNAP1RADIUS1 = 2500
+STATUS_REGISTERNAP2RADIUS1 = 2520
+STATUS_REGISTERNBP1RADIUS1 = 2550
+STATUS_REGISTERNBP2RADIUS1 = 2570
+
+STATUS_REGISTERNAP1RADIUS2 = 2502
+STATUS_REGISTERNAP2RADIUS2 = 2522
+STATUS_REGISTERNBP1RADIUS2 = 2552
+STATUS_REGISTERNBP2RADIUS2 = 2572
+
+
+STATUS_REGISTERNAP1FAI_1516_1 = 2504
+STATUS_REGISTERNAP2FAI_1516_1 = 2524
+STATUS_REGISTERNBP1FAI_1516_1 = 2554
+STATUS_REGISTERNBP2FAI_1516_1 = 2574
+
+STATUS_REGISTERNAP1FAI_1516_2 = 2506
+STATUS_REGISTERNAP2FAI_1516_2 = 2526
+STATUS_REGISTERNBP1FAI_1516_2 = 2556
+STATUS_REGISTERNBP2FAI_1516_2 = 2576
+
+STATUS_REGISTERNAP1FAI_1516_3 = 2508
+STATUS_REGISTERNAP2FAI_1516_3 = 2528
+STATUS_REGISTERNBP1FAI_1516_3 = 2558
+STATUS_REGISTERNBP2FAI_1516_3 = 2578
+
+STATUS_REGISTERNAP1FAI_1516_4 = 2510
+STATUS_REGISTERNAP2FAI_1516_4 = 2530
+STATUS_REGISTERNBP1FAI_1516_4 = 2560
+STATUS_REGISTERNBP2FAI_1516_4 = 2580
+
+STATUS_REGISTERNAP1OVERALL_RESULT = 2516
+STATUS_REGISTERNAP2OVERALL_RESULT = 2536
+STATUS_REGISTERNBP1OVERALL_RESULT = 2566
+STATUS_REGISTERNBP2OVERALL_RESULT = 2586
+
+
 
 # ─── Global AIOKafkaProducer Instance ──────────────────────────────────
 aio_producer: AIOKafkaProducer = None
@@ -385,7 +417,7 @@ def decode_string(words):
 
 async def read_specific_plc_data(client: AsyncModbusTcpClient):
     """
-    Reads specific barcode and machine status (13-bit array) data.
+    Reads machine status data from updated register addresses (without barcode flag logic).
     """
     while True:
         if not client.connected:
@@ -406,79 +438,107 @@ async def read_specific_plc_data(client: AsyncModbusTcpClient):
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
 
         try:
-            # Barcode Flags (No change in logic)
-            flags_response = await client.read_holding_registers(address=BARCODE_FLAG_1, count=2)
-            if not flags_response.isError():
-                flag1, flag2 = flags_response.registers
-                
-                if flag1 == 1:
-                    words_response = await client.read_holding_registers(*BARCODE_1_BLOCK)
-                    if not words_response.isError():
-                        barcode1 = decode_string(words_response.registers)
-                        if aio_producer:
-                            await aio_producer.send(KAFKA_TOPIC_BARCODE, value={"barcode": barcode1, "camera": "1", "ts": now})
-                        await client.write_register(BARCODE_FLAG_1, 0)
-                        logging.info(f"Barcode 1 ({barcode1}) triggered.")
-                    else:
-                        logging.error(f"Error reading BARCODE_1_BLOCK: {words_response}")
-                
-                if flag2 == 1:
-                    words_response = await client.read_holding_registers(*BARCODE_2_BLOCK)
-                    if not words_response.isError():
-                        barcode2 = decode_string(words_response.registers)
-                        if aio_producer:
-                            await aio_producer.send(KAFKA_TOPIC_BARCODE, value={"barcode": barcode2, "camera": "2", "ts": now})
-                        await client.write_register(BARCODE_FLAG_2, 0)
-                        print(f"Barcode 2 ({barcode2}) triggered.")
-                    else:
-                        print(f"Error reading BARCODE_2_BLOCK: {words_response}")
-            else:
-                print("Error reading barcode flags:", flags_response)
+            # Read all machine status registers
+            status_data = {}
+            
+            # Read NAP1 Radius1-4 and Overall Result
+            nap1_radius1 = await client.read_holding_registers(address=STATUS_REGISTERNAP1RADIUS1, count=1)
+            nap1_radius2 = await client.read_holding_registers(address=STATUS_REGISTERNAP1RADIUS2, count=1)
+            nap1_fai1 = await client.read_holding_registers(address=STATUS_REGISTERNAP1FAI_1516_1, count=1)
+            nap1_fai2 = await client.read_holding_registers(address=STATUS_REGISTERNAP1FAI_1516_2, count=1)
+            nap1_fai3 = await client.read_holding_registers(address=STATUS_REGISTERNAP1FAI_1516_3, count=1)
+            nap1_fai4 = await client.read_holding_registers(address=STATUS_REGISTERNAP1FAI_1516_4, count=1)
+            nap1_overall = await client.read_holding_registers(address=STATUS_REGISTERNAP1OVERALL_RESULT, count=1)
+            
+            # Read NAP2 Radius1-4 and Overall Result
+            nap2_radius1 = await client.read_holding_registers(address=STATUS_REGISTERNAP2RADIUS1, count=1)
+            nap2_radius2 = await client.read_holding_registers(address=STATUS_REGISTERNAP2RADIUS2, count=1)
+            nap2_fai1 = await client.read_holding_registers(address=STATUS_REGISTERNAP2FAI_1516_1, count=1)
+            nap2_fai2 = await client.read_holding_registers(address=STATUS_REGISTERNAP2FAI_1516_2, count=1)
+            nap2_fai3 = await client.read_holding_registers(address=STATUS_REGISTERNAP2FAI_1516_3, count=1)
+            nap2_fai4 = await client.read_holding_registers(address=STATUS_REGISTERNAP2FAI_1516_4, count=1)
+            nap2_overall = await client.read_holding_registers(address=STATUS_REGISTERNAP2OVERALL_RESULT, count=1)
+            
+            # Read NBP1 Radius1-4 and Overall Result
+            nbp1_radius1 = await client.read_holding_registers(address=STATUS_REGISTERNBP1RADIUS1, count=1)
+            nbp1_radius2 = await client.read_holding_registers(address=STATUS_REGISTERNBP1RADIUS2, count=1)
+            nbp1_fai1 = await client.read_holding_registers(address=STATUS_REGISTERNBP1FAI_1516_1, count=1)
+            nbp1_fai2 = await client.read_holding_registers(address=STATUS_REGISTERNBP1FAI_1516_2, count=1)
+            nbp1_fai3 = await client.read_holding_registers(address=STATUS_REGISTERNBP1FAI_1516_3, count=1)
+            nbp1_fai4 = await client.read_holding_registers(address=STATUS_REGISTERNBP1FAI_1516_4, count=1)
+            nbp1_overall = await client.read_holding_registers(address=STATUS_REGISTERNBP1OVERALL_RESULT, count=1)
+            
+            # Read NBP2 Radius1-4 and Overall Result
+            nbp2_radius1 = await client.read_holding_registers(address=STATUS_REGISTERNBP2RADIUS1, count=1)
+            nbp2_radius2 = await client.read_holding_registers(address=STATUS_REGISTERNBP2RADIUS2, count=1)
+            nbp2_fai1 = await client.read_holding_registers(address=STATUS_REGISTERNBP2FAI_1516_1, count=1)
+            nbp2_fai2 = await client.read_holding_registers(address=STATUS_REGISTERNBP2FAI_1516_2, count=1)
+            nbp2_fai3 = await client.read_holding_registers(address=STATUS_REGISTERNBP2FAI_1516_3, count=1)
+            nbp2_fai4 = await client.read_holding_registers(address=STATUS_REGISTERNBP2FAI_1516_4, count=1)
+            nbp2_overall = await client.read_holding_registers(address=STATUS_REGISTERNBP2OVERALL_RESULT, count=1)
 
-            # Machine Availability Status (13-bit array) - Publishes to KAFKA_TOPIC_MACHINE_STATUS
-            statuses_response = await client.read_holding_registers(address = STATUS_REGISTER, count= 2)
-            if not statuses_response.isError():
-                s1, s2 = statuses_response.registers
+            # Read barcode data
+            bc1_response = await client.read_holding_registers(address=2000, count=16)
+            bc2_response = await client.read_holding_registers(address=2020, count=16)
+            bc3_response = await client.read_holding_registers(address=2200, count=16)
+            bc4_response = await client.read_holding_registers(address=2220, count=16)
 
-                bitfield1 = format(s1, "013b")[::-1]
-                bitfield2 = format(s2, "013b")[::-1]
+            barcode1 = decode_string(bc1_response.registers) if (not bc1_response.isError() and bc1_response.registers) else None
+            barcode2 = decode_string(bc2_response.registers) if (not bc2_response.isError() and bc2_response.registers) else None
+            barcode3 = decode_string(bc3_response.registers) if (not bc3_response.isError() and bc3_response.registers) else None
+            barcode4 = decode_string(bc4_response.registers) if (not bc4_response.isError() and bc4_response.registers) else None
 
-                status_set_1 = {STATUS_BITS[i]: int(bitfield1[i]) for i in range(min(len(STATUS_BITS), len(bitfield1)))}
-                status_set_2 = {STATUS_BITS[i]: int(bitfield2[i]) for i in range(min(len(STATUS_BITS), len(bitfield2)))}
-
-                bc1_response = await client.read_holding_registers(address= 3100, count=16)
-                bc2_response = await client.read_holding_registers(address= 3116, count=16)
-                bc3_response = await client.read_holding_registers(address= 3132, count=16)
-                bc4_response = await client.read_holding_registers(address= 3148, count=16)
-
-                barcode1 = decode_string(bc1_response.registers) if (not bc1_response.isError() and bc1_response.registers) else None
-                barcode2 = decode_string(bc2_response.registers) if (not bc2_response.isError() and bc2_response.registers) else None
-                barcode3 = decode_string(bc3_response.registers) if (not bc3_response.isError() and bc3_response.registers) else None
-                barcode4 = decode_string(bc4_response.registers) if (not bc4_response.isError() and bc4_response.registers) else None
-
-                status_set_1.update({
+            # Prepare the status data structure
+            status_data = {
+                "timestamp": now,
+                "barcodes": {
                     "barcode1": barcode1,
                     "barcode2": barcode2,
-                    "ts": now
-                })
-
-                status_set_2.update({
                     "barcode3": barcode3,
-                    "barcode4": barcode4,
-                    "ts": now
-                })
-
-
-                # Publish to the specific MACHINE_STATUS topic
-                combined = {
-                    "set1": [ status_set_1 ],
-                    "set2": [ status_set_2 ],
+                    "barcode4": barcode4
+                },
+                "nap1": {
+                    "radius1": nap1_radius1.registers[0] if not nap1_radius1.isError() else None,
+                    "radius2": nap1_radius2.registers[0] if not nap1_radius2.isError() else None,
+                    "fai1": nap1_fai1.registers[0] if not nap1_fai1.isError() else None,
+                    "fai2": nap1_fai2.registers[0] if not nap1_fai2.isError() else None,
+                    "fai3": nap1_fai3.registers[0] if not nap1_fai3.isError() else None,
+                    "fai4": nap1_fai4.registers[0] if not nap1_fai4.isError() else None,
+                    "overall_result": nap1_overall.registers[0] if not nap1_overall.isError() else None
+                },
+                "nap2": {
+                    "radius1": nap2_radius1.registers[0] if not nap2_radius1.isError() else None,
+                    "radius2": nap2_radius2.registers[0] if not nap2_radius2.isError() else None,
+                    "fai1": nap2_fai1.registers[0] if not nap2_fai1.isError() else None,
+                    "fai2": nap2_fai2.registers[0] if not nap2_fai2.isError() else None,
+                    "fai3": nap2_fai3.registers[0] if not nap2_fai3.isError() else None,
+                    "fai4": nap2_fai4.registers[0] if not nap2_fai4.isError() else None,
+                    "overall_result": nap2_overall.registers[0] if not nap2_overall.isError() else None
+                },
+                "nbp1": {
+                    "radius1": nbp1_radius1.registers[0] if not nbp1_radius1.isError() else None,
+                    "radius2": nbp1_radius2.registers[0] if not nbp1_radius2.isError() else None,
+                    "fai1": nbp1_fai1.registers[0] if not nbp1_fai1.isError() else None,
+                    "fai2": nbp1_fai2.registers[0] if not nbp1_fai2.isError() else None,
+                    "fai3": nbp1_fai3.registers[0] if not nbp1_fai3.isError() else None,
+                    "fai4": nbp1_fai4.registers[0] if not nbp1_fai4.isError() else None,
+                    "overall_result": nbp1_overall.registers[0] if not nbp1_overall.isError() else None
+                },
+                "nbp2": {
+                    "radius1": nbp2_radius1.registers[0] if not nbp2_radius1.isError() else None,
+                    "radius2": nbp2_radius2.registers[0] if not nbp2_radius2.isError() else None,
+                    "fai1": nbp2_fai1.registers[0] if not nbp2_fai1.isError() else None,
+                    "fai2": nbp2_fai2.registers[0] if not nbp2_fai2.isError() else None,
+                    "fai3": nbp2_fai3.registers[0] if not nbp2_fai3.isError() else None,
+                    "fai4": nbp2_fai4.registers[0] if not nbp2_fai4.isError() else None,
+                    "overall_result": nbp2_overall.registers[0] if not nbp2_overall.isError() else None
                 }
-                if aio_producer:
-                    await aio_producer.send(KAFKA_TOPIC_MACHINE_STATUS, value=combined)
-                    print(f"Published combined status: {combined}")
-            else:
-                print("Error reading status registers:", statuses_response)
+            }
+
+            # Publish to Kafka
+            if aio_producer:
+                await aio_producer.send(KAFKA_TOPIC_MACHINE_STATUS, value=status_data)
+                print(f"Published machine status data: {status_data}")
 
         except ModbusException as e:
             print(f"❌ Modbus Exception during specific data read: {e}. Closing connection to force a reconnect...")
