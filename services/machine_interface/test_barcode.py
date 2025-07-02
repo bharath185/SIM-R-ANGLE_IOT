@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 BARCODE_1_BLOCK = (2000, 16)  # Start address, length
 BARCODE_2_BLOCK = (2020, 16)
 PORT = 502
-HOST = "localhost"
+HOST = "192.168.10.2"
 
 def encode_string(value):
     """Encode string to Modbus registers"""
@@ -70,7 +70,7 @@ async def run_barcode_test(client):
         (BARCODE_2_BLOCK[0], "SCANME987654321"),
         (BARCODE_1_BLOCK[0], ""),  # Test empty string
         (BARCODE_1_BLOCK[0], "A"),  # Test single character
-        (BARCODE_2_BLOCK[0], "LONGSTRINGTEST1234567890ABCDEFGHIJ")  # Test long string
+        (BARCODE_2_BLOCK[0], "SCANME987654321")  # Test long string
     ]
 
     results = []

@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
+
 from typing import Optional, List ,Dict
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime  # Add this import at the top
+from datetime import datetime,time  # Add this import at the top
 from passlib.context import CryptContext
 from fastapi.middleware.cors import CORSMiddleware  # Add this import at the top
 # Initialize FastAPI
@@ -68,8 +69,8 @@ cur.execute("""
 CREATE TABLE IF NOT EXISTS shift_master (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    start_time TIMESTAMP NOT NULL,
-    end_time TIMESTAMP NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
     description TEXT,
     created_by INTEGER REFERENCES users(id),
     created_at TIMESTAMP DEFAULT NOW()
@@ -107,7 +108,7 @@ class UserBase(BaseModel):
     email: str
     full_name: Optional[str] = None
     is_active: Optional[bool] = True
-    role_id: Optional[int] = None
+    role_id: int = None
 
 class UserCreate(UserBase):
     password: str  # Will be hashed before storage
@@ -144,8 +145,8 @@ def row_to_user(row):
 
 class ShiftBase(BaseModel):
     name: str
-    start_time: datetime
-    end_time: datetime
+    start_time: time
+    end_time: time
     description: Optional[str] = None
     created_by: Optional[int] = None
 
