@@ -114,9 +114,15 @@ services:
       PLC_IP: host.docker.internal  # Actual PLC I
       PLC_PORT: 502
       KAFKA_BROKER: kafka:9092
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: edgetoken
+      INFLUXDB_ORG: EdgeOrg
+      INFLUXDB_BUCKET: EdgeBucket
     depends_on:
       kafka:
         condition: service_healthy
+      influxdb:
+        condition: service_started
   # oee_influx_writer:
   #   build:
   #     context: ./services/oee_influx_writer

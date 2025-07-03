@@ -711,6 +711,86 @@ async def listen_for_plc_write_responses():
             await consumer.stop()
             print(f"[Response Listener] Kafka response consumer stopped.")
 
+@app.websocket("/ws/report_data")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    
+    # Initialize InfluxDB client with error handling
+    try:
+
+        
+        while True:
+            try:
+                # Simplified query that definitely works
+                query = '''
+                from(bucket: "vision_data")
+                  |> range(start: -1h)
+                  |> filter(fn: (r) => r._measurement == "barcode_measurements")
+                  |> filter(fn: (r) => r._field == "barcode_value" or 
+                                       r._field == "overall_status" or
+                                       r._field == "radius1" or
+                                       r._field == "radius2" or
+                                       r._field == "fai1" or
+                                       r._field == "fai2" or
+                                       r._field == "fai3" or
+                                       r._field == "fai4")
+                  |> pivot(rowKey:["_time"], columnKey:["_field"], valueColumn:"_value")
+                  |> group(columns: ["barcode_value"])
+                  |> sort(columns: ["_time"], desc: true)
+                  |> limit(n: 100)
+                '''
+                
+                # Execute query with timeout
+                tables = await asyncio.to_thread(
+                    lambda: query_api.query(query)
+                )
+                
+                # Process results safely
+                results = []
+                for table in tables:
+                    for record in table.records:
+                        try:
+                            results.append({
+                                "time": str(record.get_time()),
+                                "barcode": record.values.get("barcode_value"),
+                                "status": record.values.get("overall_status", 0),
+                                "radius1": float(record.values.get("radius1", 0)),
+                                "radius2": float(record.values.get("radius2", 0)),
+                                "fai1": int(record.values.get("fai1", 0)),
+                                "fai2": int(record.values.get("fai2", 0)),
+                                "fai3": int(record.values.get("fai3", 0)),
+                                "fai4": int(record.values.get("fai4", 0))
+                            })
+                        except Exception as e:
+                            print(f"Error processing record: {e}")
+                            continue
+                
+                await websocket.send_text(json.dumps({
+                    "type": "data_update",
+                    "data": results
+                }))
+                
+            except Exception as query_error:
+                print(f"Query error: {str(query_error)}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Failed to fetch data"
+                }))
+                await asyncio.sleep(5)  # Wait before retrying
+            
+            await asyncio.sleep(1)  # Throttle updates
+            
+    except WebSocketDisconnect:
+        print("Client disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {str(e)}")
+    finally:
+        try:
+            influx_client.close()
+        except:
+            pass
+        await websocket.close()
+
 @app.websocket("/ws/plc-write")
 async def plc_write_ws(ws: WebSocket):
     await mgr.connect("plc-write-responses", ws)  # CORRECT

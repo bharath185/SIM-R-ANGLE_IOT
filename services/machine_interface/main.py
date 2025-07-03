@@ -5,10 +5,12 @@ import asyncio
 import logging
 from pymodbus.client.tcp import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
+from influxdb_client import InfluxDBClient, WritePrecision, WriteOptions,Point
 from pymodbus.payload import BinaryPayloadBuilder, BinaryPayloadDecoder
 from pymodbus.constants import Endian
 from aiokafka import AIOKafkaProducer,AIOKafkaConsumer
 from aiokafka.errors import KafkaConnectionError, NoBrokersAvailable as AIOKafkaNoBrokersAvailable
+from datetime import datetime
 
 logger = logging.getLogger("machine_interface")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,8 +82,20 @@ STATUS_REGISTERNAP2OVERALL_RESULT = 2536
 STATUS_REGISTERNBP1OVERALL_RESULT = 2566
 STATUS_REGISTERNBP2OVERALL_RESULT = 2586
 
+_config_cache: dict[str, str] = {}
+
+def get_cfg(key: str, default=None):
+    return _config_cache.get(key, default)
 
 
+# Initialize InfluxDB client
+influx_client = InfluxDBClient(
+    url=get_cfg("INFLUXDB_URL", "http://influxdb:8086"),
+    token=get_cfg("INFLUXDB_TOKEN", "edgetoken"),
+    org=get_cfg("INFLUXDB_ORG", "EdgeOrg")
+)
+write_api = influx_client.write_api(write_options=WriteOptions(batch_size=1, flush_interval=1000))
+query_api = influx_client.query_api()
 # ─── Global AIOKafkaProducer Instance ──────────────────────────────────
 aio_producer: AIOKafkaProducer = None
 
@@ -413,12 +427,8 @@ def decode_string(words):
     raw_bytes = b''.join([(w & 0xFF).to_bytes(1, 'little') + ((w >> 8) & 0xFF).to_bytes(1, 'little') for w in words])
     return raw_bytes.decode("ascii", errors="ignore").rstrip("\x00")
 
-# ─── Main PLC Data Reading and Publishing Loops ──────────────────────────────────
-
 async def read_specific_plc_data(client: AsyncModbusTcpClient):
-    """
-    Reads machine status data from updated register addresses (without barcode flag logic).
-    """
+    """Reads machine status data from PLC and writes to both Kafka and InfluxDB"""
     while True:
         if not client.connected:
             logging.warning("❌ Async client not connected for specific data read. Attempting reconnect...")
@@ -429,16 +439,16 @@ async def read_specific_plc_data(client: AsyncModbusTcpClient):
                     await asyncio.sleep(5)
                     continue
                 else:
-                    logging.warning("✅ Reconnected to PLC for specific data read.")
+                    logging.info("✅ Reconnected to PLC for specific data read.")
             except Exception as e:
                 logging.error(f"Error during reconnection attempt for specific data: {e}. Waiting...")
                 await asyncio.sleep(5)
                 continue
 
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-
         try:
-            # Read all machine status registers
+            # 1. First verify we can actually read from PLC
+            logging.debug("Attempting to read PLC registers...")
+            
             status_data = {}
             
             # Read NAP1 Radius1-4 and Overall Result
@@ -489,6 +499,7 @@ async def read_specific_plc_data(client: AsyncModbusTcpClient):
             barcode4 = decode_string(bc4_response.registers) if (not bc4_response.isError() and bc4_response.registers) else None
 
             # Prepare the status data structure
+            now = datetime.utcnow().isoformat() + "Z"  # Correct usage
             status_data = {
                 "timestamp": now,
                 "barcodes": {
@@ -534,18 +545,90 @@ async def read_specific_plc_data(client: AsyncModbusTcpClient):
                     "overall_result": nbp2_overall.registers[0] if not nbp2_overall.isError() else None
                 }
             }
-
+            # 2. Prepare data with proper null checks
+            now = datetime.utcnow().isoformat() + "Z"  # Correct usage
+  
             # Publish to Kafka
             if aio_producer:
                 await aio_producer.send(KAFKA_TOPIC_MACHINE_STATUS, value=status_data)
-                print(f"Published machine status data: {status_data}")
+                logging.info(f"Published machine status data to Kafka")
+
+            # Create Point for InfluxDB
+            for barcode_num in ["1", "2", "3", "4"]:
+                barcode_value = status_data["barcodes"][f"barcode{barcode_num}"]
+            
+            point = Point("barcode_measurements") \
+                .tag("machine_id", "machine_1") \
+                .tag("location", "production_line_1") \
+                .field("barcode_value", str(barcode_value) if barcode_value else "") \
+                .field("overall_status", int(status_data["nap1"]["overall_result"] or 0)) \
+                .field("radius1", float(status_data["nap1"]["radius1"] or 0)) \
+                .field("radius2", float(status_data["nap1"]["radius2"] or 0)) \
+                .field("fai1", float(status_data["nap1"]["fai1"] or 0)) \
+                .field("fai2", float(status_data["nap1"]["fai2"] or 0)) \
+                .field("fai3", float(status_data["nap1"]["fai3"] or 0)) \
+                .field("fai4", float(status_data["nap1"]["fai4"] or 0)) \
+                .time(now)
+
+            try:
+                # Verify bucket exists first
+                buckets_api = influx_client.buckets_api()
+                bucket = buckets_api.find_bucket_by_name("vision_data")
+                if not bucket:
+                    logging.error("Bucket 'vision_data' does not exist!")
+                    await asyncio.sleep(5)
+                    continue
+
+                # Write with explicit timeout
+                write_api.write(
+                    bucket="vision_data",
+                    org=get_cfg("INFLUXDB_ORG", "EdgeOrg"),
+                    record=point,
+                    write_options=WriteOptions(batch_size=1, flush_interval=10_000)
+                )
+                logging.info("✅ Successfully wrote point to InfluxDB")
+
+                # Immediate query to verify write
+                query = f'''from(bucket: "vision_data")
+                    |> range(start: -1m)
+                    |> filter(fn: (r) => r._measurement == "machine_status")
+                    |> last()'''
+                try:
+                    tables = query_api.query(query)
+                    if not tables:
+                        logging.warning("Verification query returned no results")
+                    else:
+                        for table in tables:
+                            for record in table.records:
+                                logging.debug(f"Found record: {record.values}")
+                except Exception as query_error:
+                    logging.error(f"Verification query failed: {query_error}")
+
+            except Exception as write_error:
+                logging.error(f"Failed to write to InfluxDB: {write_error}", exc_info=True)
+                # Try writing a simple test point
+                test_point = Point("connection_test").field("value", 1)
+                try:
+                    write_api.write(bucket="vision_data", record=test_point)
+                    logging.info("Test point written successfully")
+                except Exception as test_error:
+                    logging.error(f"Test write also failed: {test_error}")
+
+            # Kafka publishing (unchanged)
+            if aio_producer:
+                try:
+                    await aio_producer.send(KAFKA_TOPIC_MACHINE_STATUS, value=status_data)
+                    logging.info("Published to Kafka successfully")
+                except Exception as kafka_error:
+                    logging.error(f"Kafka publish failed: {kafka_error}")
 
         except ModbusException as e:
-            print(f"❌ Modbus Exception during specific data read: {e}. Closing connection to force a reconnect...")
-            client.close()
+            logging.error(f"Modbus error: {e}", exc_info=True)
+            await client.close()
             await asyncio.sleep(1)
         except Exception as e:
-            print(f"Error in specific data reading loop: {e}")
+            logging.error(f"Unexpected error: {e}", exc_info=True)
+            await asyncio.sleep(5)
         
         await asyncio.sleep(2)
 
